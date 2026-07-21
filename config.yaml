@@ -1,0 +1,43 @@
+# ── Recording ─────────────────────────────────────────────────────────────────
+epoch_s: 30                     # Epoch duration in seconds
+min_recording_hours: 24.0       # Minimum recording length to be analysed
+analysis_day_start_hour: 17     # Start of each analysis day (17:00 → 17:00)
+
+# ── Sleep/wake algorithms ─────────────────────────────────────────────────────
+# Roenneberg — main sleep window boundaries (1 = sleep/rest)
+roe_threshold: 0.15
+roe_min_seed_period: "30Min"
+# Sadeh — epoch-by-epoch (1 = sleep, 0 = wake); used for WASO, SB/WB, TST, SE
+
+# ── Non-wear detection ────────────────────────────────────────────────────────
+nonwear_min_consecutive_zero_min: 90.0  # Consecutive zero-count minutes
+
+# ── Nap detection ─────────────────────────────────────────────────────────────
+nap_min_duration_min: 20        # Minimum nap duration (minutes)
+nap_max_duration_min: 180       # Maximum nap duration (minutes)
+daytime_start: "08:00"          # Daytime window for nap search
+daytime_end:   "20:00"
+
+# ── Night metrics (Sadeh after onset/offset validation) ───────────────────────
+active_epoch_threshold: 0.0     # Counts strictly above this = mobile epoch
+sb_min_consecutive_immobile_epochs: 1   # Min epochs for a sleep bout
+wb_min_consecutive_movement_epochs: 4   # Min consecutive wake epochs for a wake bout
+
+# ── Sleep diary ───────────────────────────────────────────────────────────────
+diary_nights_of_interest:
+  - 2
+  - 3
+
+# ── Output files ──────────────────────────────────────────────────────────────
+output_dir:      "output"
+state_filename:  "pipeline_state.json"
+log_filename:    "pipeline.log"
+
+# ── Discard reasons (shown in the dropdown) ───────────────────────────────────
+discard_reasons:
+  - "no correspondence with diary"
+  - "excessive missing data"
+  - "likely non-wear"
+  - "wrong recording dates"
+  - "corrupted signal"
+  - "other"
