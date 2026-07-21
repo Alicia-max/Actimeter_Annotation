@@ -14,7 +14,6 @@ _C: Dict[str, str] = {
     # Data traces
     "activity":    "#0b0a3a",  # dark navy — readable bars without washing out overlays
     "roe":         "#2bd126",
-    "sadeh":       "#fc51fc",
     "nonwear":     "#D3D3D3",
 
     # Tier 1 — Diary (light blue, dashdot, lower 40 % of plot)
@@ -131,7 +130,6 @@ def _vlines_and_annotations(diary_row, algo_onset, algo_offset, val_onset, val_o
 def build_night_figure(
     activity: pd.Series,
     roe: pd.Series,
-    sadeh: pd.Series,
     nonwear: pd.Series,
     window: Dict,
     diary_row,
@@ -166,8 +164,7 @@ def build_night_figure(
     vl_shapes, annotations = _vlines_and_annotations(
         diary_row, algo_onset, algo_offset, val_onset, val_offset)
 
-    roe_w   = roe.loc[ws:we].astype(float)
-    sadeh_w = sadeh.loc[ws:we].astype(float)
+    roe_w = roe.loc[ws:we].astype(float)
 
     traces = [
         go.Bar(
@@ -183,13 +180,6 @@ def build_night_figure(
             hovertemplate="%{x|%H:%M:%S}<br>Roe=%{text}<extra></extra>",
             text=roe_w.values.astype(int).astype(str).tolist(),
         ),
-        go.Scatter(
-            x=t, y=(1 - sadeh_w.values) * y_max * 0.5,
-            name="Sadeh sleep (0=sleep / 1=wake)",
-            mode="lines", line=dict(color=_C["sadeh"], width=1.5, dash="dash"),
-            hovertemplate="%{x|%H:%M:%S}<br>Sadeh_wake=%{text}<extra></extra>",
-            text=sadeh_w.values.astype(int).astype(str).tolist(),
-        )
     ]
 
     return go.Figure(
@@ -219,7 +209,7 @@ def build_night_figure(
     )
 
 
-def build_overview_figure(activity: pd.Series, roe: pd.Series, sadeh: pd.Series,
+def build_overview_figure(activity: pd.Series, roe: pd.Series,
                           nonwear: pd.Series, windows: List[Dict], epoch_s: int) -> go.Figure:
     """
     Downsampled overview of the full recording.
@@ -229,7 +219,6 @@ def build_overview_figure(activity: pd.Series, roe: pd.Series, sadeh: pd.Series,
     step = max(1, len(activity) // 3000)
     act     = activity.iloc[::step]
     roe_d   = roe.iloc[::step].astype(float)
-    sadeh_d = sadeh.iloc[::step].astype(float)
     nw_d    = nonwear.iloc[::step]
     t       = act.index
     # Cap y-axis at ~98th percentile so rare spikes don't flatten the rest
@@ -267,11 +256,6 @@ def build_overview_figure(activity: pd.Series, roe: pd.Series, sadeh: pd.Series,
                 name="Roenneberg (sleep=1)", mode="lines",
                 line=dict(color=_C["roe"], width=1.5),
             ),
-            go.Scatter(
-                x=t, y=(1 - sadeh_d.values) * y_max * 0.35,
-                name="Sadeh sleep", mode="lines",
-                line=dict(color=_C["sadeh"], width=1, dash="dash"),
-            )
         ],
         layout=go.Layout(
             title="Full recording (overview only)",

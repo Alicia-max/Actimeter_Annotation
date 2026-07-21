@@ -90,7 +90,7 @@ def detect_nonwear(data: pd.Series, config: Config) -> pd.Series:
 
 
 def run_sleep_wake_algorithm(raw, config: Config, logger: logging.Logger):
-    """Run Roenneberg (window) + Sadeh (epoch).  Roe: 1=sleep.  Sadeh: 1=wake."""
+    """Run Roenneberg for main sleep window boundaries (1 = sleep/rest)."""
     seed = config.roe_min_seed_period
     roe = None
     try:
@@ -103,10 +103,7 @@ def run_sleep_wake_algorithm(raw, config: Config, logger: logging.Logger):
             raise
     if roe is None:
         raise RuntimeError("Roenneberg failed for all seed candidates. Recording may be too short or fragmented.")
-
-    logger.info("Sadeh")
-    sadeh = raw.Sadeh()
-    return roe, sadeh
+    return roe
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,13 +279,49 @@ def _run_spans(values: np.ndarray, target: float) -> List[Tuple[int, int]]:
     return spans
 
 
+def _fill_isolated_mvt_epochs(values: np.ndarray,fill: float = 0.5,) -> np.ndarray:
+    """
+    Replace isolated movement epochs with `fill`.
+
+    An isolated movement epoch is a value > 0 surrounded by zeros:
+
+        [0, movement, 0] -> [0, fill, 0]
+
+    Example
+    -------
+    Input:
+        [0, 0, 4, 0, 0, 3, 2, 0]
+
+    Output with fill=0.5:
+        [0, 0, 0.5, 0, 0, 3, 2, 0]
+
+    The consecutive movement epochs [3, 2] are not modified.
+    """
+    result = np.asarray(values, dtype=float).copy()
+
+    if result.size < 3:
+        return result
+
+    isolated_movement = (
+        (result[:-2] == 0)
+        & (result[1:-1] > 0)
+        & (result[2:] == 0)
+    )
+
+    result[1:-1][isolated_movement] = fill
+
+    return result
+
 def _compute_bout_metrics(
-    sadeh: pd.Series,
     activity: pd.Series,
-    config: Config, tib:float
+    config: Config,
+    tib: float,TSP_min: float
 ) -> Dict[str, Any]:
     """
-    Compute sleep, wake, activity, and bout metrics within one validated night.
+    Score wake/sleep from raw activity within one validated night.
+
+    Pre-process: isolated single-epoch zeros → 0.5 (light movement).
+    Then: activity > active_epoch_threshold = wake/mobile; else sleep/immobile.
     """
     out: Dict[str, Any] = {
         "n_SB": np.nan,
@@ -305,58 +338,17 @@ def _compute_bout_metrics(
         "taux_immobilite": np.nan,
         "taux_mobilite": np.nan,
     }
-
-    if sadeh is None or sadeh.empty:
-        return out
-    
     epoch_min = config.epoch_s / 60.0
     activity_threshold = config.active_epoch_threshold
     sb_min = config.sb_min_consecutive_immobile_epochs
     wb_min = config.wb_min_consecutive_movement_epochs
-    sadeh_numeric = pd.to_numeric(sadeh, errors="coerce")
-    valid_sadeh = sadeh_numeric.isin([0, 1])
-    binary = sadeh_numeric.loc[valid_sadeh].to_numpy(dtype=int)
-    if binary.size == 0:
-        return out
-
-    # ------------------------------------------------------------------
-    # Direct Sadeh sleep/wake metrics
-    # ------------------------------------------------------------------
-
-    n_sleep_epochs = int(np.sum(binary == 1))
-    n_wake_epochs = int(np.sum(binary == 0))
-    out["TST_min"] = round(n_sleep_epochs * epoch_min, 1)
-    out["SE"] = round(100.0 * out["TST_min"] / tib, 1) if tib and tib > 0 else np.nan
-    out["WASO_min"] = round(n_wake_epochs * epoch_min, 1)
-
-    # ------------------------------------------------------------------
-    # Wake and sleep bouts
-    # ------------------------------------------------------------------
-    wake_runs = _run_spans(binary, target=0)
-    wb_spans = [(start, stop) for start, stop in wake_runs if (stop - start) >= wb_min]
-    wb_lens = [stop - start for start, stop in wb_spans]
-    sleep_runs = _run_spans(binary, target=1)
-    sb_spans = [(start, stop) for start, stop in sleep_runs if (stop - start) >= sb_min]
-    sb_lens = [stop - start for start, stop in sb_spans]
-    n_sb = len(sb_lens)
-    n_wb = len(wb_lens)
-    sb_total_min = sum(sb_lens) * epoch_min
-    wb_total_min = sum(wb_lens) * epoch_min
-    out["n_SB"] = n_sb
-    out["n_WB"] = n_wb
-    out["SB_total_duration_min"] = round(sb_total_min, 1)
-    out["WB_total_duration_min"] = round(wb_total_min, 1)
-    out["SB_mean_duration_min"] = (round(sb_total_min / n_sb, 1) if n_sb > 0 else np.nan)
-    out["WB_mean_duration_min"] = (round(wb_total_min / n_wb, 1) if n_wb > 0 else np.nan)
-
-    # ------------------------------------------------------------------
-    # Raw activity metrics
-    # ------------------------------------------------------------------
 
     if activity is not None and not activity.empty:
         activity_numeric = pd.to_numeric(activity, errors="coerce").dropna()
 
         if not activity_numeric.empty:
+            
+            # Calculate mean movement and mobility
             out["mean_mvt_night"] = round(float(activity_numeric.mean()),2)
             mobile_epochs = activity_numeric[activity_numeric > activity_threshold]
             out["mean_mobility"] = (round(float(mobile_epochs.mean()), 2) if not mobile_epochs.empty else np.nan)
@@ -365,13 +357,40 @@ def _compute_bout_metrics(
             n_immobile = int((activity_numeric <= activity_threshold).sum())
             out["taux_mobilite"] = round(n_mobile / n_epochs,4)*100
             out["taux_immobilite"] = round(n_immobile / n_epochs,4)*100
+            
+            #Calculate sleep and wake bouts
+            new_activity = _fill_isolated_mvt_epochs(activity_numeric.to_numpy(dtype=float),fill=0.5)
+            binary_activity = (new_activity <= activity_threshold).astype(int)
+            wake_runs = _run_spans(binary_activity, target=0)
+            wb_spans = [(start, stop) for start, stop in wake_runs if (stop - start) >= wb_min] 
+            wb_lens = [stop - start for start, stop in wb_spans]
+            binary_for_sleep_bouts = np.ones_like(binary_activity)
+            for start, stop in wb_spans:
+                binary_for_sleep_bouts[start:stop] = 0
+            sleep_runs = _run_spans(binary_for_sleep_bouts, target=1)
+            sb_spans = [(start, stop) for start, stop in sleep_runs if (stop - start) >= sb_min]
+            sb_lens = [stop - start for start, stop in sb_spans]
+            n_sb = len(sb_lens)
+            n_wb = len(wb_lens)
+            sb_total_min = sum(sb_lens) * epoch_min
+            wb_total_min = sum(wb_lens) * epoch_min
+            out["n_SB"] = n_sb
+            out["n_WB"] = n_wb
+            out["SB_total_duration_min"] = round(sb_total_min, 1)
+            out["WB_total_duration_min"] = round(wb_total_min, 1)
+            out["SB_mean_duration_min"] = (round(sb_total_min / n_sb, 1) if n_sb > 0 else np.nan)
+            out["WB_mean_duration_min"] = (round(wb_total_min / n_wb, 1) if n_wb > 0 else np.nan)
+            out["TST_min"] = round(TSP_min-wb_total_min, 1)
+            out["SE"] = round(100.0 * out["TST_min"] / tib, 1) if tib and tib > 0 else np.nan
+            out['FI'] = round((n_wb/n_sb), 1)*100
+
 
     return out
 
 
-def calculate_sleep_parameters(window, validated, diary_row, sadeh, activity,
+def calculate_sleep_parameters(window, validated, diary_row, activity,
                                config: Config, logger) -> Dict:
-    """Night metrics after validated onset/offset."""
+    """Night metrics after validated onset/offset (raw activity wake/sleep)."""
     onset:  Optional[pd.Timestamp] = validated.get("sleep_onset_validated")
     offset: Optional[pd.Timestamp] = validated.get("sleep_offset_validated")
 
@@ -395,9 +414,9 @@ def calculate_sleep_parameters(window, validated, diary_row, sadeh, activity,
         "TinBed_min":               np.nan,
         "SL_min":                   np.nan,
         "TSP_min":                  np.nan,
-        "TST_min":                  np.nan, 
+        "TST_min":                  np.nan,
         "SE":                       np.nan,
-        "WASO_min":                 np.nan, 
+        "FI":                 np.nan,
         "n_SB":                     np.nan,
         "SB_mean_duration_min":     np.nan,
         "SB_total_duration_min":    np.nan,
@@ -433,9 +452,8 @@ def calculate_sleep_parameters(window, validated, diary_row, sadeh, activity,
     params["TSP_min"] = round((offset - onset).total_seconds() / 60, 1)
     try:
         act_win = activity.loc[onset:offset]
-        sadeh_win = sadeh.loc[onset:offset]
         if len(act_win) > 0:
-            params.update(_compute_bout_metrics(sadeh_win, act_win, config, params["TinBed_min"]))
+            params.update(_compute_bout_metrics(act_win, config, params["TinBed_min"], params["TSP_min"]))
     except Exception as e:
         flags.append("bout_metrics_error")
         logger.warning(f"  Bout metrics error: {e}")

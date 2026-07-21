@@ -7,7 +7,6 @@ analysis_day_start_hour: 17     # Start of each analysis day (17:00 → 17:00)
 # Roenneberg — main sleep window boundaries (1 = sleep/rest)
 roe_threshold: 0.15
 roe_min_seed_period: "30Min"
-# Sadeh — epoch-by-epoch (1 = sleep, 0 = wake); used for WASO, SB/WB, TST, SE
 
 # ── Non-wear detection ────────────────────────────────────────────────────────
 nonwear_min_consecutive_zero_min: 90.0  # Consecutive zero-count minutes
@@ -18,8 +17,10 @@ nap_max_duration_min: 180       # Maximum nap duration (minutes)
 daytime_start: "08:00"          # Daytime window for nap search
 daytime_end:   "20:00"
 
-# ── Night metrics (Sadeh after onset/offset validation) ───────────────────────
-active_epoch_threshold: 0.0     # Counts strictly above this = mobile epoch
+# ── Night metrics (raw activity after onset/offset validation) ────────────────
+# Isolated single-epoch zeros are filled to 0.5 before scoring.
+# Counts strictly above active_epoch_threshold = wake/mobile; else sleep/immobile.
+active_epoch_threshold: 0.5     # Counts strictly above this = wake/mobile epoch
 sb_min_consecutive_immobile_epochs: 1   # Min epochs for a sleep bout
 wb_min_consecutive_movement_epochs: 4   # Min consecutive wake epochs for a wake bout
 
@@ -29,7 +30,7 @@ diary_nights_of_interest:
   - 3
 
 # ── Output files ──────────────────────────────────────────────────────────────
-output_dir:      "output"
+output_dir:      "../../../../../Volumes/m-Sterpenich/#SHARE/7T_awake/bids_etude/derivatives/actigraphy"
 state_filename:  "pipeline_state.json"
 log_filename:    "pipeline.log"
 

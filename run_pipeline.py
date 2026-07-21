@@ -16,10 +16,10 @@ Then open http://localhost:8050 in your browser.
 
 Algorithm combination
 ---------------------
-* Roenneberg  : sleep window boundaries (1 = sleep/rest, 0 = wake)
-* Sadeh       : epoch-by-epoch movement / sleep (1 = wake, 0 = sleep)
-                used for WASO (= n_wake_epochs × 0.5 min), SB/WB
-* Raw activity: mean_mvt, mean_mobility, taux immobilité / mobilité
+* Roenneberg   : sleep window boundaries (1 = sleep/rest, 0 = wake)
+* Raw activity : epoch wake/sleep (counts > threshold = wake), after
+                 filling isolated zeros → 0.5; used for TST, SE, WASO, SB/WB,
+                 mean_mvt, mean_mobility, taux immobilité / mobilité
 """
 
 from __future__ import annotations
@@ -85,16 +85,39 @@ def _setup_logging(output_dir: Path, log_filename: str) -> logging.Logger:
     return logger
 
 
-def save_results(nights: List[Dict], naps: List[Dict], output_dir: Path, logger) -> None:
+def save_results(nights: List[Dict], naps: List[Dict], output_dir: Path,
+                 subject_id: str, logger) -> None:
     """
-    Save the results to a CSV file.
+    Save results as subject-prefixed CSVs:
+      {subject}_sleep_parameters.csv  — validated nights only
+      {subject}_excluded-night.csv   — discarded / recording-discarded nights
+      {subject}_naps.csv             — naps (if any)
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Saving results to {output_dir}")
-    if nights:
-        pd.DataFrame(nights).to_csv(output_dir / "sleep_parameters.csv", index=False)
+
+    validated = [r for r in nights if r.get("validation_status") == "validated"]
+    excluded  = [r for r in nights
+                 if r.get("validation_status") in ("discarded", "recording_discarded")]
+
+    validated_path = output_dir / f"{subject_id}_sleep_parameters.csv"
+    excluded_path  = output_dir / f"{subject_id}_excluded-night.csv"
+    naps_path      = output_dir / f"{subject_id}_naps.csv"
+
+    if validated:
+        pd.DataFrame(validated).to_csv(validated_path, index=False)
+    elif validated_path.exists():
+        validated_path.unlink()
+
+    if excluded:
+        pd.DataFrame(excluded).to_csv(excluded_path, index=False)
+    elif excluded_path.exists():
+        excluded_path.unlink()
+
     if naps:
-        pd.DataFrame(naps).to_csv(output_dir / "naps.csv", index=False)
+        pd.DataFrame(naps).to_csv(naps_path, index=False)
+    elif naps_path.exists():
+        naps_path.unlink()
 
 
 def save_state(state: Dict, path: Path) -> None:
@@ -128,7 +151,7 @@ def _render_overview(state: Dict):
     """
     
     D = _D
-    fig = build_overview_figure(D["activity"], D["roe"], D["sadeh"],
+    fig = build_overview_figure(D["activity"], D["roe"],
                                 D["nonwear"], D["windows"], D["config"].epoch_s)
     n_wins = len(D["windows"])
     incomplete = sum(1 for w in D["windows"] if w["incomplete_window"])
@@ -175,7 +198,7 @@ def _render_night_validation(state: Dict):
     val_offset = parse_ts_input(val_offset_str, window["window_start"])
 
     fig = build_night_figure(
-        D["activity"], D["roe"], D["sadeh"], D["nonwear"],
+        D["activity"], D["roe"], D["nonwear"],
         window, diary_row, algo_onset, algo_offset, val_onset, val_offset,
         epoch_s=D["config"].epoch_s,
         title=f" Night {idx+1}/{len(D['windows'])} — {window['analysis_date']}" +
@@ -299,7 +322,7 @@ def _render_parameter_review(state: Dict):
         ("TSP_min", "Total sleep period (min)"),
         ("TST_min", "Total sleep time (min)"),
         ("SE", "Sleep efficiency (%)"),
-        ("WASO_min", "Wake after sleep onset (min)"),
+        ("FI", "Fragmentation index (%)"),
         ("SL_min", "Sleep latency (min)"),
         ("n_SB", "Sleep bouts (n)"),
         ("SB_mean_duration_min", "Sleep bout mean duration (min)"),
@@ -360,7 +383,7 @@ def _render_done(state: Dict):
 
     return html.Div([
         html.Div([
-            html.H3("✔ Pipeline complete", className="text-success"),
+            html.H3("Pipeline complete", className="text-success"),
             html.Ul([
                 html.Li(f"Validated nights: {n_val}"),
                 html.Li(f"Discarded nights: {n_disc}"),
@@ -368,8 +391,9 @@ def _render_done(state: Dict):
             ]),
             html.P(["Results saved in: ", html.Code(str(D["output_dir"]))]),
             html.Ul([
-                html.Li(html.Code("sleep_parameters.csv — one row per night")),
-                html.Li(html.Code("naps.csv — one row per nap")),
+                html.Li(html.Code(f"{D['subject']}_sleep_parameters.csv — validated nights")),
+                html.Li(html.Code(f"{D['subject']}_excluded-night.csv — excluded nights")),
+                html.Li(html.Code(f"{D['subject']}_naps.csv — naps")),
                 html.Li(html.Code(f"{D['config'].log_filename} — processing log")),
             ]),
         ], className="card p-4 shadow-sm border-success"),
@@ -419,7 +443,7 @@ def _register_callbacks(app):
         val_onset  = parse_ts_input(onset_val,  window["window_start"])
         val_offset = parse_ts_input(offset_val, window["window_start"])
         return build_night_figure(
-            D["activity"], D["roe"], D["sadeh"], D["nonwear"],
+            D["activity"], D["roe"], D["nonwear"],
             window, diary_row, algo_onset, algo_offset, val_onset, val_offset,
             epoch_s=D["config"].epoch_s,
         )
@@ -471,7 +495,7 @@ def _register_callbacks(app):
 
             params = calculate_sleep_parameters(
                 window, validated, diary_row,
-                D["sadeh"], D["activity"],
+                D["activity"],
                 D["config"], D["logger"],
             )
 
@@ -661,8 +685,8 @@ def _register_callbacks(app):
 
 def _persist(state: Dict, D: Dict) -> None:
     """Save current results + state to disk after each validated/discarded night."""
-    save_results(state["nights"], state["naps"], D["output_dir"], D["logger"])
-    save_state(state, D["output_dir"] / D["config"].state_filename)
+    save_results(state["nights"], state["naps"], D["output_dir"], D["subject"], D["logger"])
+    save_state(state, D["output_dir"] / f'{D["subject"]}_{D["config"].state_filename}')
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
@@ -692,7 +716,7 @@ def _initial_state(resume_path: Optional[Path] = None) -> Dict:
     return base
 
 
-def run_pipeline(agd_path: str, diary_path: Optional[str], output_dir: str,
+def run_pipeline(subject: str, agd_path: str, diary_path: Optional[str], output_dir: str,
                  resume: bool, config: Config, port: int = 8050) -> None:
     """Load all data, build the Dash app, and start the server."""
 
@@ -704,12 +728,13 @@ def run_pipeline(agd_path: str, diary_path: Optional[str], output_dir: str,
     log.info(f"  AGD   : {agd_path}")
     log.info(f"  Diary : {diary_path or 'None'}")
     log.info(f"  Output: {out}")
+    log.info(f"  Subject: {subject}")
     log.info("=" * 60)
 
     # Load
     raw  = load_actigraphy_file(agd_path, log)
     info = validate_recording(raw, config, log)
-    roe, sadeh = run_sleep_wake_algorithm(raw, config, log)
+    roe = run_sleep_wake_algorithm(raw, config, log)
     nonwear = detect_nonwear(raw.data, config)
     windows = create_analysis_windows(raw, config, log)
     diary = None
@@ -725,11 +750,11 @@ def run_pipeline(agd_path: str, diary_path: Optional[str], output_dir: str,
         "raw":               raw,
         "activity":          raw.data,
         "roe":               roe,
-        "sadeh":             sadeh,
         "nonwear":           nonwear,
         "windows":           windows,
         "diary":             diary,
         "rec_info":          info,
+        "subject":           subject,
         "participant_id":    pid,
         "source_file":       Path(agd_path).name,
         "output_dir":        out,
@@ -737,7 +762,7 @@ def run_pipeline(agd_path: str, diary_path: Optional[str], output_dir: str,
         "logger":            log,
     }
 
-    state_path   = out / config.state_filename
+    state_path   = out / f"{subject}_{config.state_filename}"
     initial_data = _initial_state(state_path if resume else None)
     if resume and initial_data.get("current_window_idx", 0) > 0:
         log.info(f"Resuming from window {initial_data['current_window_idx']+1}")
@@ -776,6 +801,7 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--agd",    required=True,  help="Path to *30sec.agd file")
+    parser.add_argument("--subject", required=True, help="Subject ID")
     parser.add_argument("--diary",  default=None,   help="Path to sleep diary CSV (optional)")
     parser.add_argument("--output", default=None,   help="Output directory (overrides config)")
     parser.add_argument("--config", default=None,   help="Path to config.yaml (optional)")
@@ -818,6 +844,7 @@ def main() -> None:
         cfg.diary_nights_of_interest = [int(x.strip()) for x in args.diary_nights.split(",")]
 
     run_pipeline(
+        subject    = args.subject,
         agd_path   = args.agd,
         diary_path = args.diary,
         output_dir = cfg.output_dir,

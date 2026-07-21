@@ -32,7 +32,7 @@ class Config:
     daytime_start: str
     daytime_end: str
 
-    # Night metrics (Sadeh)
+    # Night metrics (raw activity)
     active_epoch_threshold: float
     sb_min_consecutive_immobile_epochs: int
     wb_min_consecutive_movement_epochs: int
