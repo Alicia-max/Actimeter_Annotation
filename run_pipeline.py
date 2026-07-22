@@ -1,25 +1,6 @@
 """
 Interactive actigraphy sleep analysis pipeline 
 Usage (subject specific data)
------
-    python run_pipeline.py \\
-        --agd    "data/sub-23 (2026-04-22)30sec.agd" \\
-        --diary  "data/sub-23_sleep-diary.csv" \\
-        --output "output/sub-23/" \\
-        --config config.yaml \\
-        [--resume] [--port 8050]
-
-    If --config is omitted the built-in defaults are used.
-    CLI flags (--roe-threshold, --nap-min, etc.) override config.yaml values.
-
-Then open http://localhost:8050 in your browser.
-
-Algorithm combination
----------------------
-* Roenneberg   : sleep window boundaries (1 = sleep/rest, 0 = wake)
-* Raw activity : epoch wake/sleep (counts > threshold = wake), after
-                 filling isolated zeros → 0.5; used for TST, SE, WASO, SB/WB,
-                 mean_mvt, mean_mobility, taux immobilité / mobilité
 """
 
 from __future__ import annotations
@@ -35,10 +16,10 @@ import numpy as np
 import pandas as pd
 from config import Config
 from compute import *
-from plots import build_night_figure, build_overview_figure, build_plot_legend_panel
+from plots import build_night_figure, build_overview_figure, build_nap_figure, build_plot_legend_panel
 warnings.filterwarnings("ignore", category=UserWarning)
 import dash
-from dash import html, dcc, Input, Output, State, callback_context as ctx, ALL
+from dash import html, dcc, Input, Output, State, callback_context as ctx, ALL, no_update
 # Server-side data store (loaded once before the app starts, never serialised)
 _D: Dict[str, Any] = {} # Dictionary to store the data
 _BS = "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" #URL of the Bootstrap stylesheet (pre-written CSS rules)
@@ -201,8 +182,8 @@ def _render_night_validation(state: Dict):
         D["activity"], D["roe"], D["nonwear"],
         window, diary_row, algo_onset, algo_offset, val_onset, val_offset,
         epoch_s=D["config"].epoch_s,
-        title=f" Night {idx+1}/{len(D['windows'])} — {window['analysis_date']}" +
-              (" INCOMPLETE" if window["incomplete_window"] else ""))
+        title=f"Night {idx+1}/{len(D['windows'])} — {window['analysis_date']}" +
+              ("INCOMPLETE" if window["incomplete_window"] else ""))
 
     diary_lines = []
     if diary_row is not None:
@@ -229,7 +210,7 @@ def _render_night_validation(state: Dict):
                             html.Div([html.Label("Sleep offset"),dcc.Input(id="offset-input",value=val_offset_str,placeholder="YYYY-MM-DD HH:MM",type="text",className="form-control")],className="col-md-4")],className="row mb-3"),
                 html.Button("Update plot",id="update-btn",className="btn btn-info me-2"),
                 html.Button("Validate night",id="validate-btn",className="btn btn-success me-2"),
-                html.Button( "Previous night",id="prev-night-btn",className="btn btn-secondary ms-4",disabled=(idx == 0),title="Undo the previous night and go back to it")],**_CARD),
+                html.Button("Previous night",id="prev-night-btn",className="btn btn-secondary me-2",disabled=(idx == 0),title="Undo the previous night and go back to it")],**_CARD),
 
         # Discard section
         html.Div([html.H6("Discard"),html.Div([dcc.Dropdown(id="discard-reason",options=[{"label": reason, "value": reason} for reason in cfg.discard_reasons],
@@ -243,7 +224,21 @@ def _render_night_validation(state: Dict):
 def _render_nap_validation(state: Dict):
     D   = _D
     idx = state["current_window_idx"]
+    window = D["windows"][idx]
     naps = state.get("current_candidate_naps", [])
+    validated = state.get("current_validated") or {}
+    main_onset  = parse_ts_input(str(validated.get("sleep_onset_validated") or ""),
+                                 window["window_start"])
+    main_offset = parse_ts_input(str(validated.get("sleep_offset_validated") or ""),
+                                 window["window_start"])
+
+    fig = build_nap_figure(
+        D["activity"], D["roe"], D["nonwear"],
+        window, naps,
+        main_onset=main_onset, main_offset=main_offset,
+        epoch_s=D["config"].epoch_s,
+        title=f"Nap validation — window {idx+1}/{len(D['windows'])} — {window['analysis_date']}",
+    )
 
     nap_cards = []
     for i, nap in enumerate(naps):
@@ -290,11 +285,20 @@ def _render_nap_validation(state: Dict):
 
     return html.Div([
         html.Div([
-            html.H4(f"Nap validation — window {idx+1}, {D['windows'][idx]['analysis_date']}"),
+            html.H4(f"Nap validation — window {idx+1}, {window['analysis_date']}"),
             html.P(f"{len(naps)} candidate nap(s) found "
                    f"(>{D['config'].nap_min_duration_min} min, "
                    f"{D['config'].daytime_start}–{D['config'].daytime_end})",
                    className="text-muted"),
+            dcc.Graph(id="nap-graph", figure=fig, config={"scrollZoom": True}),
+            html.Small([
+                html.Span("■ ", style={"color": "#E76F51", "fontWeight": "bold"}),
+                "Highlighted bars = detected nap activity  ·  ",
+                html.Span("■ ", style={"color": "#F4A261", "fontWeight": "bold"}),
+                "Orange shade = nap window  ·  ",
+                html.Span("■ ", style={"color": "#E63946", "fontWeight": "bold"}),
+                "Red shade = main night",
+            ], className="text-muted"),
         ], **_CARD),
         *nap_cards,
         html.Div([
@@ -420,6 +424,9 @@ def _register_callbacks(app):
         prevent_initial_call=True,
     )
     def on_start(n, state):
+        # Ignore ghost fires when the button is removed from the layout
+        if not n or state.get("step") != "overview":
+            return no_update
         state["step"] = "night_validation"
         state["edit_onset"] = state["edit_offset"] = None
         state["message"] = ""
@@ -435,6 +442,8 @@ def _register_callbacks(app):
         prevent_initial_call=True,
     )
     def update_graph(n, onset_val, offset_val, state):
+        if not n or state.get("step") != "night_validation":
+            return no_update
         D   = _D
         idx = state["current_window_idx"]
         window    = D["windows"][idx]
@@ -464,6 +473,18 @@ def _register_callbacks(app):
     def handle_night_actions(v_n, dn_n, dr_n, prev_n, onset_val, offset_val, reason, state):
         D   = _D
         tid = ctx.triggered_id
+        # Ghost fire when buttons are torn down on step change (n_clicks becomes None)
+        click_map = {
+            "validate-btn": v_n,
+            "discard-night-btn": dn_n,
+            "discard-rec-btn": dr_n,
+            "prev-night-btn": prev_n,
+        }
+        if tid not in click_map or not click_map[tid]:
+            return no_update
+        if state.get("step") != "night_validation":
+            return no_update
+
         idx = state["current_window_idx"]
         window = D["windows"][idx]
 
@@ -471,10 +492,10 @@ def _register_callbacks(app):
             onset  = parse_ts_input(onset_val,  window["window_start"])
             offset = parse_ts_input(offset_val, window["window_start"])
             if onset is None or offset is None:
-                state["message"] = "⚠ Both onset and offset must be set."
+                state["message"] = " Both onset and offset must be set."
                 return state
             if onset >= offset:
-                state["message"] = "⚠ Onset must be before offset."
+                state["message"] = " Onset must be before offset."
                 return state
 
             diary_row = match_diary_to_window(window, D["diary"], D["config"].analysis_day_start_hour)
@@ -550,7 +571,7 @@ def _register_callbacks(app):
 
         if tid == "prev-night-btn":
             if idx <= 0:
-                state["message"] = "⚠ Already at the first window, cannot go back."
+                state["message"] = " Already at the first window, cannot go back."
                 return state
             # Remove the last saved night (undo it) and step back
             if state["nights"]:
@@ -563,7 +584,7 @@ def _register_callbacks(app):
             _persist(state, D)
             return state
 
-        return state
+        return no_update
 
     # Nap validation → done / back to night validation
     @app.callback(
@@ -580,6 +601,11 @@ def _register_callbacks(app):
     def done_naps(n, back_n, onsets, offsets, decisions, reasons, state):
         D   = _D
         tid = ctx.triggered_id
+        click_map = {"done-naps-btn": n, "back-to-night-btn": back_n}
+        if tid not in click_map or not click_map[tid]:
+            return no_update
+        if state.get("step") != "nap_validation":
+            return no_update
 
         if tid == "back-to-night-btn":
             # Return to night validation for the same window (onset/offset preserved)
@@ -618,7 +644,7 @@ def _register_callbacks(app):
                 "rejection_reason":  reason or "",
             })
 
-        accepted_count = sum(1 for n in validated_naps if n["validation_status"] == "accepted")
+        accepted_count = sum(1 for nap in validated_naps if nap["validation_status"] == "accepted")
         params = state.get("current_params", {})
         params["number_of_naps"] = accepted_count
         state["current_params"]  = params
@@ -639,6 +665,18 @@ def _register_callbacks(app):
     def handle_review(c_n, gb_n, d_n, state):
         D   = _D
         tid = ctx.triggered_id
+        # Ghost fire: after Save & continue, confirm-btn is removed from the DOM and
+        # Dash re-triggers this callback — without a guard that advances a second time.
+        click_map = {
+            "confirm-btn": c_n,
+            "go-back-btn": gb_n,
+            "review-discard-btn": d_n,
+        }
+        if tid not in click_map or not click_map[tid]:
+            return no_update
+        if state.get("step") != "parameter_review":
+            return no_update
+
         idx = state["current_window_idx"]
 
         if tid == "confirm-btn":
@@ -680,7 +718,7 @@ def _register_callbacks(app):
                             else "night_validation"
             return state
 
-        return state
+        return no_update
 
 
 def _persist(state: Dict, D: Dict) -> None:
@@ -723,13 +761,11 @@ def run_pipeline(subject: str, agd_path: str, diary_path: Optional[str], output_
     global _D
     out = Path(output_dir)
     log = _setup_logging(out, config.log_filename)
-    log.info("=" * 60)
     log.info("SLEEP PIPELINE — START")
     log.info(f"  AGD   : {agd_path}")
     log.info(f"  Diary : {diary_path or 'None'}")
     log.info(f"  Output: {out}")
     log.info(f"  Subject: {subject}")
-    log.info("=" * 60)
 
     # Load
     raw  = load_actigraphy_file(agd_path, log)
@@ -776,14 +812,10 @@ def run_pipeline(subject: str, agd_path: str, diary_path: Optional[str], output_
     app.title = f"Sleep Pipeline — {pid}"
     app.layout = html.Div([
         # Header
-        html.Div([
-            html.H3(f"Sleep Pipeline — {pid}",
-                    style={"color":"white","margin":0}),
-        ], style={"background":"#343a40","padding":"12px 24px","marginBottom":"20px"}),
+        html.Div([html.H3(f"Sleep Pipeline — {pid}",style={"color":"white","margin":0})], style={"background":"#343a40","padding":"12px 24px","marginBottom":"20px"}),
         # Main content driven by state store
         dcc.Store(id="state", data=initial_data),
-        html.Div(id="content", className="container-fluid px-4"),
-    ])
+        html.Div(id="content", className="container-fluid px-4")])
 
     _register_callbacks(app)
 
@@ -791,7 +823,6 @@ def run_pipeline(subject: str, agd_path: str, diary_path: Optional[str], output_
     print(f"  Open your browser at:  http://localhost:{port}")
     print(f"  Press Ctrl+C to quit.")
     print(f"{'='*60}\n")
-
     app.run(debug=False, port=port, use_reloader=False)
 
 

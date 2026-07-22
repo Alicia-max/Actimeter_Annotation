@@ -33,6 +33,11 @@ _C: Dict[str, str] = {
     "shade_diary": "#5ab5f2",
     "shade_algo":  "#7B2FBE",
     "shade_val":   "#E63946",
+
+    # Nap validation
+    "nap":         "#F4A261",
+    "shade_nap":   "#F4A261",
+    "nap_activity":"#E76F51",
 }
 
 
@@ -205,6 +210,149 @@ def build_night_figure(
             shapes=nw_shapes + vl_shapes,
             annotations=annotations,
             margin=dict(t=110, b=130, l=60, r=40),
+        ),
+    )
+
+
+def build_nap_figure(
+    activity: pd.Series,
+    roe: pd.Series,
+    nonwear: pd.Series,
+    window: Dict,
+    naps: List[Dict],
+    main_onset=None,
+    main_offset=None,
+    epoch_s: int = 30,
+    title: str = "",
+) -> go.Figure:
+    """Window plot for nap validation: activity + Roenneberg with candidate naps highlighted."""
+    ws, we = window["window_start"], window["window_end"]
+    act = activity.loc[ws:we]
+    y_max = _robust_ymax(act, percentile=98.0)
+    t = act.index
+    bar_width_ms = epoch_s * 1000
+    roe_w = roe.loc[ws:we].astype(float)
+
+    shapes: List[Dict] = []
+    annotations: List[Dict] = []
+
+    # Non-wear
+    nw_win = nonwear.loc[ws:we]
+    for ep_s, ep_e in extract_episodes(nw_win.astype(int), value=1):
+        shapes.append(dict(
+            type="rect",
+            x0=ep_s.isoformat(), x1=ep_e.isoformat(),
+            y0=0, y1=1, yref="paper",
+            fillcolor=_C["nonwear"], opacity=0.30,
+            line_width=0, layer="below",
+        ))
+
+    # Main night (validated) — muted so naps stand out
+    if main_onset is not None and main_offset is not None:
+        shapes.append(dict(
+            type="rect",
+            x0=_iso(main_onset), x1=_iso(main_offset),
+            y0=0, y1=1, yref="paper",
+            fillcolor=_C["shade_val"], opacity=0.12,
+            line_width=0, layer="below",
+        ))
+        for ts, label in ((main_onset, "Night onset"), (main_offset, "Night offset")):
+            shapes.append(dict(
+                type="line",
+                x0=_iso(ts), x1=_iso(ts),
+                y0=0.70, y1=1.00, yref="paper",
+                line=dict(color=_C["val_onset"], width=2, dash="solid"),
+            ))
+            annotations.append(dict(
+                x=_iso(ts), y=1.08, yref="paper",
+                text=f"<b>{label}</b>", showarrow=False,
+                font=dict(size=9, color=_C["val_onset"]),
+                textangle=-45, xanchor="left",
+            ))
+
+    # Candidate naps — shade + boundary lines + labels
+    for i, nap in enumerate(naps):
+        onset = pd.Timestamp(nap["nap_onset_algorithm"])
+        offset = pd.Timestamp(nap["nap_offset_algorithm"])
+        shapes.append(dict(
+            type="rect",
+            x0=_iso(onset), x1=_iso(offset),
+            y0=0, y1=1, yref="paper",
+            fillcolor=_C["shade_nap"], opacity=0.28,
+            line_width=0, layer="below",
+        ))
+        for ts in (onset, offset):
+            shapes.append(dict(
+                type="line",
+                x0=_iso(ts), x1=_iso(ts),
+                y0=0.0, y1=0.55, yref="paper",
+                line=dict(color=_C["nap"], width=2.5, dash="dash"),
+            ))
+        mid = onset + (offset - onset) / 2
+        annotations.append(dict(
+            x=_iso(mid), y=1.14, yref="paper",
+            text=f"<b>Nap {i+1}</b> ({nap.get('nap_duration_min', 0):.0f} min)",
+            showarrow=False,
+            font=dict(size=11, color=_C["nap"]),
+            xanchor="center",
+        ))
+
+    # Activity outside naps (muted) + activity inside naps (emphasized)
+    in_nap = pd.Series(False, index=t)
+    for nap in naps:
+        onset = pd.Timestamp(nap["nap_onset_algorithm"])
+        offset = pd.Timestamp(nap["nap_offset_algorithm"])
+        in_nap |= (t >= onset) & (t <= offset)
+
+    act_out = act.where(~in_nap)
+    act_in  = act.where(in_nap)
+
+    traces = [
+        go.Bar(
+            x=t, y=act_out.values, name="Activity",
+            marker_color=_C["activity"], opacity=0.45,
+            width=bar_width_ms,
+            hovertemplate="%{x|%H:%M:%S}<br>Activity: %{y}<extra></extra>",
+        ),
+        go.Bar(
+            x=t, y=act_in.values, name="Nap activity (detected)",
+            marker_color=_C["nap_activity"], opacity=0.95,
+            width=bar_width_ms,
+            hovertemplate="%{x|%H:%M:%S}<br>Nap activity: %{y}<extra></extra>",
+        ),
+        go.Scatter(
+            x=t, y=roe_w.values * y_max,
+            name="Roenneberg (1=sleep)",
+            mode="lines", line=dict(color=_C["roe"], width=2),
+            hovertemplate="%{x|%H:%M:%S}<br>Roe=%{text}<extra></extra>",
+            text=roe_w.values.astype(int).astype(str).tolist(),
+        ),
+    ]
+
+    return go.Figure(
+        data=traces,
+        layout=go.Layout(
+            title=title or f"Nap validation — {window['analysis_date']}",
+            height=460,
+            barmode="overlay",
+            hovermode="x unified",
+            xaxis=dict(
+                title="Time",
+                type="date",
+                tickformat="%H:%M",
+                dtick=3_600_000,
+                tickangle=-45,
+                range=[ws.isoformat(), we.isoformat()],
+            ),
+            yaxis=dict(
+                title="Activity counts",
+                range=[0, y_max],
+                fixedrange=False,
+            ),
+            legend=dict(orientation="h", y=-0.28),
+            shapes=shapes,
+            annotations=annotations,
+            margin=dict(t=100, b=120, l=60, r=40),
         ),
     )
 
