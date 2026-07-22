@@ -1,5 +1,5 @@
 # ── Recording ─────────────────────────────────────────────────────────────────
-epoch_s: 30                     # Epoch duration in seconds
+epoch_s: 60                     # Epoch duration in seconds
 min_recording_hours: 24.0       # Minimum recording length to be analysed
 analysis_day_start_hour: 17     # Start of each analysis day (17:00 → 17:00)
 
