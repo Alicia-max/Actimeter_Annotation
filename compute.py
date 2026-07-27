@@ -312,6 +312,92 @@ def _fill_isolated_mvt_epochs(values: np.ndarray,fill: float = 0.5,) -> np.ndarr
 
     return result
 
+def _compute_before_after_movement(
+    activity: pd.Series,
+    onset: pd.Timestamp,
+    offset: pd.Timestamp,
+    config: Config,
+    max_activity: float = 2000,
+    max_invalid_fraction: float = 0.5,
+) -> Dict[str, float]:
+    """
+    Compute mean movement during:
+      - the 2 hours before validated sleep onset
+      - the 2 hours after validated sleep offset
+
+    Processing:
+      1. Clip to data that actually exists in the recording.
+      2. Cap values above max_activity (winsorize). Morning magnitude
+         often exceeds 2000 on this sensor — capping avoids dropping the
+         whole window while limiting the influence of extreme spikes.
+      3. Remove consecutive zero runs lasting at least the configured
+         non-wear duration.
+      4. Keep shorter zero runs — they may represent real immobility.
+      5. Reject only if, after non-wear cleaning, fewer than 50% of the
+         window's epochs remain usable.
+    """
+    out = {"mean_mvt_2h_before": np.nan, "mean_mvt_2h_after": np.nan}
+
+    if activity is None or activity.empty or onset is None or offset is None:
+        return out
+
+    onset = pd.Timestamp(onset)
+    offset = pd.Timestamp(offset)
+
+    def summarize_window(window: pd.Series) -> float:
+        if window is None or len(window) == 0:
+            return np.nan
+
+        values = pd.to_numeric(window, errors="coerce")
+        n_original = len(values)
+        if n_original == 0:
+            return np.nan
+
+        cleaned = values.astype(float).copy()
+
+        # Cap aberrantly high values (do not drop — after wake, mag often > 2000)
+        cleaned.loc[cleaned > max_activity] = max_activity
+
+        # Detect long consecutive runs of zeros (non-wear), keep short zeros
+        zero_mask = cleaned.eq(0)
+        run_id = zero_mask.ne(zero_mask.shift(fill_value=False)).cumsum()
+        min_zero_epochs = max(
+            1, int(config.nonwear_min_consecutive_zero_min * 60 / config.epoch_s)
+        )
+        for _, run in cleaned.groupby(run_id):
+            if run.empty or not bool(run.eq(0).all()):
+                continue
+            if len(run) >= min_zero_epochs:
+                cleaned.loc[run.index] = np.nan
+
+        # Reject if too much of the window was missing / long non-wear
+        n_usable = int(cleaned.notna().sum())
+        if n_usable == 0 or n_usable / n_original < (1.0 - max_invalid_fraction):
+            return np.nan
+        return round(float(cleaned.mean()), 2)
+
+    before_start = onset - pd.Timedelta(hours=2)
+    after_end = offset + pd.Timedelta(hours=2)
+
+    # Half-open around the night so onset/offset epochs are not double-counted
+    before_window = activity.loc[(activity.index >= before_start) & (activity.index < onset)]
+    after_window = activity.loc[(activity.index > offset) & (activity.index <= after_end)]
+
+    # Require at least half of the expected 2 h to be present in the recording
+    expected_epochs = int(2 * 3600 / config.epoch_s)
+    min_epochs = max(1, int(expected_epochs * (1.0 - max_invalid_fraction)))
+    if len(before_window) < min_epochs:
+        out["mean_mvt_2h_before"] = np.nan
+    else:
+        out["mean_mvt_2h_before"] = summarize_window(before_window)
+    if len(after_window) < min_epochs:
+        out["mean_mvt_2h_after"] = np.nan
+    else:
+        out["mean_mvt_2h_after"] = summarize_window(after_window)
+
+    return out
+
+
 def _compute_bout_metrics(
     activity: pd.Series,
     config: Config,
@@ -391,8 +477,14 @@ def _compute_bout_metrics(
 def calculate_sleep_parameters(window, validated, diary_row, activity,
                                config: Config, logger) -> Dict:
     """Night metrics after validated onset/offset (raw activity wake/sleep)."""
-    onset:  Optional[pd.Timestamp] = validated.get("sleep_onset_validated")
-    offset: Optional[pd.Timestamp] = validated.get("sleep_offset_validated")
+    onset_raw = validated.get("sleep_onset_validated")
+    offset_raw = validated.get("sleep_offset_validated")
+    onset: Optional[pd.Timestamp] = pd.Timestamp(onset_raw) if onset_raw not in (None, "") else None
+    offset: Optional[pd.Timestamp] = pd.Timestamp(offset_raw) if offset_raw not in (None, "") else None
+    if onset is not None and pd.isna(onset):
+        onset = None
+    if offset is not None and pd.isna(offset):
+        offset = None
 
     params: Dict[str, Any] = {
         "participant_id":           validated.get("participant_id", ""),
@@ -427,6 +519,8 @@ def calculate_sleep_parameters(window, validated, diary_row, activity,
         "mean_mobility":            np.nan,
         "taux_immobilite":          np.nan,
         "taux_mobilite":            np.nan,
+        "mean_mvt_2h_before":       np.nan,
+        "mean_mvt_2h_after":        np.nan,
         "validation_status":        validated.get("validation_status", ""),
         "discard_reason":           validated.get("discard_reason", ""),
         "quality_flags":            "",
@@ -454,6 +548,7 @@ def calculate_sleep_parameters(window, validated, diary_row, activity,
         act_win = activity.loc[onset:offset]
         if len(act_win) > 0:
             params.update(_compute_bout_metrics(act_win, config, params["TinBed_min"], params["TSP_min"]))
+            params.update(_compute_before_after_movement(activity=activity, onset=onset, offset=offset,config=config))
     except Exception as e:
         flags.append("bout_metrics_error")
         logger.warning(f"  Bout metrics error: {e}")

@@ -338,6 +338,8 @@ def _render_parameter_review(state: Dict):
         ("mean_mobility", "Mean mobility (>0)"),
         ("taux_immobilite", "Taux immobilité (% repos)"),
         ("taux_mobilite", "Taux mobilité (% mouvement)"),
+        ("mean_mvt_2h_before", "Mean movement 2h before sleep onset"),
+        ("mean_mvt_2h_after", "Mean movement 2h after sleep offset"),
         ("quality_flags", "Quality flags"),
         ("manual_onset_correction", "Manual onset correction"),
         ("manual_offset_correction", "Manual offset correction"),
