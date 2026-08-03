@@ -12,7 +12,7 @@ from compute import extract_episodes
 from dash import html
 _C: Dict[str, str] = {
     # Data traces
-    "activity":    "#0b0a3a",  # dark navy — readable bars without washing out overlays
+    "activity":    "seagreen",  # dark navy — readable bars without washing out overlays
     "roe":         "#2bd126",
     "nonwear":     "#D3D3D3",
 
